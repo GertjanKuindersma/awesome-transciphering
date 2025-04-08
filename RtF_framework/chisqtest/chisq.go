@@ -354,7 +354,6 @@ func RunChi2(SNPDir, SNPFileName, pValue, Runtime, SampleSize, SNPs string) {
 	or1 := evaluator.SubNew(n11Scaled, r1Scaled)
 	or1 = evaluator.SubNew(or1, c1Scaled)
 	or1 = evaluator.AddNew(or1, dScaled)
-	evaluator.RescaleMany(or1, 1, or1)
 	
 	orN = evaluator.MulRelinNew(n11, or1)
 	evaluator.RescaleMany(orN, 1, orN)
