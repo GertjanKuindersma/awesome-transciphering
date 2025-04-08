@@ -418,7 +418,6 @@ func RunChi2(SNPDir, SNPFileName, pValue, Runtime, SampleSize, SNPs string) {
 	or1, err := eval.SubNew(n11Scaled, r1Scaled)
 	or1, err = eval.SubNew(or1, c1Scaled)
 	or1, err = eval.AddNew(or1, dScaled)
-	eval.Rescale(or1, or1)
 	
 	orN, err = eval.MulRelinNew(n11, or1)
 	eval.Rescale(orN, orN)
