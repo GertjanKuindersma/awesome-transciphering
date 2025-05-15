@@ -405,8 +405,8 @@ var DefaultBootstrapParams = []*BootstrappingParameters{
 	// 1546
 
 	{
-		LogN:     16,
-		LogSlots: 15,
+		LogN:     14,
+		LogSlots: 13,
 		Scale:    1 << 40,
 		t:        0xffa0001, // temporal value for t
 		Sigma:    DefaultSigma,

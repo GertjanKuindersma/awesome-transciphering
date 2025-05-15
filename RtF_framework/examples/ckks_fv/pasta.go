@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math"
 	"math/big"
-	"os"
 	"time"
 
 	"github.com/ldsec/lattigo/v2/ckks_fv"
@@ -324,6 +323,25 @@ func benchmarkRtFPasta( pastaParam int) {
 	// To equalize the scale, the function evaluator.SetScale(ciphertext, parameters.Scale) can be used at the expense of one level.
 	ctBoot, _ = hbtp.HalfBoot(ciphertext, false)
 
+	ckksEncryptor := ckks_fv.NewCKKSEncryptorFromPk(params,pk)
+
+	values := make([]complex128, params.Slots())
+	for i := range values {
+		values[i] = complex(2, 0)
+	}
+
+	mul_plaintext := ckksEncoder.EncodeComplexAtLvlNew(ctBoot.Level(), values, params.LogSlots())
+	mul_cipher := ckksEncryptor.EncryptNew(mul_plaintext)
+	
+	redecrypt_mul := ckksDecryptor.DecryptNew(mul_cipher)
+	redecode_mul := ckksEncoder.DecodeComplex(redecrypt_mul,params.LogSlots())
+	fmt.Println("redecode_mul", redecode_mul[:10])
+	
+	out := ckks_fv.NewCiphertextCKKS(params,ctBoot.Degree()+mul_cipher.Degree(),ctBoot.Level(),ctBoot.Scale()*mul_cipher.Scale())
+	fvEvaluator.Mul(ctBoot, ctBoot, out)
+	ctBoot = out
+	
+
 	elapsed = time.Since(Start) 
 	fmt.Printf("The E2E took %v\n", elapsed)
 	valuesWant := make([]complex128, params.Slots())
@@ -337,166 +355,7 @@ func benchmarkRtFPasta( pastaParam int) {
 }
 
 
-func findPastaModDown(pastaParam int, radix int) {
-	var err error
-
-	var kgen ckks_fv.KeyGenerator
-	var fvEncoder ckks_fv.MFVEncoder
-	var sk *ckks_fv.SecretKey
-	var pk *ckks_fv.PublicKey
-	var fvEncryptor ckks_fv.MFVEncryptor
-	var fvDecryptor ckks_fv.MFVDecryptor
-	var fvEvaluator ckks_fv.MFVEvaluator
-	var fvNoiseEstimator ckks_fv.MFVNoiseEstimator
-	var pasta ckks_fv.MFVPasta
-
-	var nonces [][]byte
-	var key []uint64
-	var stCt []*ckks_fv.Ciphertext
-	var keystream [][]uint64
-
-	var pastaModDown []int
-	var stcModDown []int
-
-	// Pasta parameter
-	blocksize := ckks_fv.PastaParams[pastaParam].Blocksize
-	numRound := ckks_fv.PastaParams[pastaParam].NumRound
-	plainModulus := ckks_fv.PastaParams[pastaParam].PlainModulus
-
-	// RtF Pasta parameters
-	// Four sets of parameters (index 0 to 1) ensuring 128 bit of security
-	// are available in github.com/smilecjf/lattigo/v2/ckks_fv/rtf_params
-	// LogSlots is hardcoded in the parameters, but can be changed from 4 to 15.
-	// When changing logSlots make sure that the number of levels allocated to CtS is
-	// smaller or equal to logSlots.
-
-	btpParams := ckks_fv.DefaultBootstrapParams[0] // generate btp parameters 
-	hbtpParams := btpParams.HalfbtpParams() // get hbtp parameter from btp
-	params, err := hbtpParams.Params()
-	if err != nil {
-		panic(err)
-	}
-	params.SetPlainModulus(plainModulus)
-	params.SetLogFVSlots(params.LogN())
-
-	// Scheme context and keys
-	kgen = ckks_fv.NewKeyGenerator(params)
-	sk, pk = kgen.GenKeyPairSparse(hbtpParams.H)
-
-	fvEncoder = ckks_fv.NewMFVEncoder(params)
-
-	fvEncryptor = ckks_fv.NewMFVEncryptorFromPk(params, pk)
-	fvDecryptor = ckks_fv.NewMFVDecryptor(params, sk)
-	fvNoiseEstimator = ckks_fv.NewMFVNoiseEstimator(params, sk)
-
-	pDcds := fvEncoder.GenSlotToCoeffMatFV(radix)
-	rotations := kgen.GenRotationIndexesForSlotsToCoeffsMat(pDcds)
-	rotkeys := kgen.GenRotationKeysForRotations(rotations, true, sk)
-	rlk := kgen.GenRelinearizationKey(sk)
-
-	fvEvaluator = ckks_fv.NewMFVEvaluator(params, ckks_fv.EvaluationKey{Rlk: rlk, Rtks: rotkeys}, pDcds)
-
-	// Generating data set
-	key = make([]uint64, blocksize)
-	// for i := 0; i < blocksize; i++ {
-	// 	key[i] = uint64(i + 1) // Use (1, ..., 16) for testing
-	// }
-	key, _ = generateRandomKey(blocksize)
-
-	nonces = make([][]byte, params.FVSlots())
-	for i := 0; i < params.FVSlots(); i++ {
-		nonces[i] = make([]byte, 8)
-		rand.Read(nonces[i])
-	}
-	counter := make([]byte, 8)
-	rand.Read(counter)
-
-	keystream = make([][]uint64, params.FVSlots())
-	for i := 0; i < 1; i++ {
-		keystream[i] = plainPasta(blocksize, numRound, nonces[i], counter, key, params.PlainModulus())
-	}
-	outputsize := blocksize / 2
-
-	Start := time.Now()
-
-	// Find proper nbInitModDown value for fvHera
-	fmt.Println("=========== Start to find nbInitModDown ===========")
-	pasta = ckks_fv.NewMFVPasta( key, pastaParam, params, fvEncoder, fvEncryptor, fvDecryptor, fvEvaluator, 0)
-	stCt = pasta.CryptNoModSwitch(nonces, counter)
-
-	elapsed := time.Since(Start) 
-	fmt.Printf("The Crypt operation took %v\n", elapsed)
-
-	invBudgets := make([]int, outputsize)
-	minInvBudget := int((^uint(0)) >> 1) // MaxInt
-	for i := 0; i < outputsize; i++ {
-		ksSlot := fvEvaluator.SlotsToCoeffsNoModSwitch(stCt[i])
-
-		invBudgets[i] = fvNoiseEstimator.InvariantNoiseBudget(ksSlot)
-		if invBudgets[i] < minInvBudget {
-			minInvBudget = invBudgets[i]
-		}
-		fvEvaluator.ModSwitchMany(ksSlot, ksSlot, ksSlot.Level())
-
-		ksCt := fvDecryptor.DecryptNew(ksSlot)
-		ksCoef := ckks_fv.NewPlaintextRingT(params)
-		fvEncoder.DecodeRingT(ksCt, ksCoef)
-
-		for j := 0; j < params.FVSlots(); j++ {
-			br_j := utils.BitReverse64(uint64(j), uint64(params.LogN()))
-
-			if ksCoef.Element.Value()[0].Coeffs[0][br_j] != keystream[j][i] {
-				fmt.Printf("[-] Validity failed")
-				os.Exit(0)
-			}
-		}
-	}
-	fmt.Printf("Budget info : min %d in %v\n", minInvBudget, invBudgets)
-
-	qi := params.Qi()
-	qiCount := params.QiCount()
-	logQi := make([]int, qiCount)
-	for i := 0; i < qiCount; i++ {
-		logQi[i] = int(math.Round(math.Log2(float64(qi[i]))))
-	}
-
-	nbInitModDown := 0
-	cutBits := logQi[qiCount-1]
-	for cutBits+40 < minInvBudget { // if minInvBudget is too close to cutBits, decryption can be failed
-		nbInitModDown++
-		cutBits += logQi[qiCount-nbInitModDown-1]
-	}
-	fmt.Printf("Preferred nbInitModDown = %d\n\n", nbInitModDown)
-
-	fmt.Println("=========== Start to find PastaModDown & StcModDown ===========")
-	pasta = ckks_fv.NewMFVPasta(key, pastaParam, params, fvEncoder, fvEncryptor, fvDecryptor, fvEvaluator, nbInitModDown)
-	stCt, pastaModDown = pasta.CryptAutoModSwitch(nonces, counter, fvNoiseEstimator)
-	_, stcModDown = fvEvaluator.SlotsToCoeffsAutoModSwitch(stCt[0], fvNoiseEstimator)
-	for i := 0; i < outputsize; i++ {
-		ksSlot := fvEvaluator.SlotsToCoeffs(stCt[i], stcModDown)
-		if ksSlot.Level() > 0 {
-			fvEvaluator.ModSwitchMany(ksSlot, ksSlot, ksSlot.Level())
-		}
-
-		ksCt := fvDecryptor.DecryptNew(ksSlot)
-		ksCoef := ckks_fv.NewPlaintextRingT(params)
-		fvEncoder.DecodeRingT(ksCt, ksCoef)
-
-		for j := 0; j < params.FVSlots(); j++ {
-			br_j := utils.BitReverse64(uint64(j), uint64(params.LogN()))
-
-			if ksCoef.Element.Value()[0].Coeffs[0][br_j] != keystream[j][i] {
-				fmt.Printf("[-] Validity failed")
-				os.Exit(0)
-			}
-		}
-	}
-
-	fmt.Printf("Pasta modDown : %v\n", pastaModDown)
-	fmt.Printf("SlotsToCoeffs modDown : %v\n", stcModDown)
-}
-
-func printDebug2(params *ckks_fv.Parameters, ciphertext *ckks_fv.Ciphertext, valuesWant []complex128, decryptor ckks_fv.CKKSDecryptor, encoder ckks_fv.CKKSEncoder) {
+func printDebug(params *ckks_fv.Parameters, ciphertext *ckks_fv.Ciphertext, valuesWant []complex128, decryptor ckks_fv.CKKSDecryptor, encoder ckks_fv.CKKSEncoder) {
 
 	valuesTest := encoder.DecodeComplex(decryptor.DecryptNew(ciphertext), params.LogSlots())
 	logSlots := params.LogSlots()
@@ -512,6 +371,6 @@ func printDebug2(params *ckks_fv.Parameters, ciphertext *ckks_fv.Ciphertext, val
 	fmt.Println(precStats.String())
 }
 
-func main2() {
-	benchmarkRtFPasta( ckks_fv.PASTA5M)
+func main() {
+	benchmarkRtFPasta( ckks_fv.PASTA5S)
 }
